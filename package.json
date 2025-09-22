@@ -1,0 +1,17 @@
+{
+  "name": "mqtt-js-demo",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "simulate": "node simulator/index.js",
+    "backend": "node backend/index.js"
+  },
+  "dependencies": {
+    "mqtt": "^5.5.0",
+    "pino": "^9.2.0"
+  }
+}
