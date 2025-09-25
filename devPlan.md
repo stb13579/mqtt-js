@@ -33,6 +33,18 @@ protocol websockets
 ## Milestone 2 — Simulator (Day 1–2)
 
 - CLI: `npm run simulate -- --vehicles=500 --rate=1s --qos=1 --jitter=200ms --region=paris`
+- Make it easy to extend (e.g., add fuel level, engine status)
+- Publish to `fleet/{vehicleId}/telemetry` with JSON payload:
+```json
+{
+  "vehicleId": "vehicle-123",
+  "timestamp": 1697059200000,
+  "location": { "lat": 48.8566, "lng": 2.3522 },
+  "speed": 45.5,
+  "fuel": 78.3
+}
+```
+- Add a .env config file for defaults, with the example.env format for source control best practices. 
 - Randomized routes (polyline paths), configurable seeds, graceful reconnects
 - Optional command subscription: respond to `fleet/broadcast/commands` (e.g., set publish interval)
 
@@ -55,7 +67,37 @@ protocol websockets
 - Cluster markers when N is high; throttle renders (e.g., 250ms)
 - Error handling for WS reconnects
 
----
+## Milestone 4a - Extend the simulator code (Day 3)
+
+- Add fuel level and engine status to the payload
+- Update the simulator to publish these new fields
+- Ensure the backend can handle and store these new fields
+- Extend the simulator to incorporate the CLI options, including the number of vehicles, publish rate, QoS level, and jitter. 
+  - Randomly generate vehicle IDs and initial locations for each vehicle.
+  - Implement a simple movement algorithm to simulate vehicle movement over time.
+  - Ensure the simulator can handle graceful shutdowns and reconnects to the broker.
+
+## Milestone 4b - Resolve frontend-backend payload mismatch (Day 4)
+
+- Agree on the minimal payload structure for WebSocket messages
+- Update backend to send the agreed structure
+- Update frontend to correctly parse and display the new structure
+  - Specific issues: sidebar filters are not currently included in the code (e.g. fuel level and status)
+
+## Milestone 4c - Improve frontend  and DX (Day 4)
+
+- Migrate to Vite
+- Optimize WebSocket message handling (e.g., batch updates, reduce frequency)
+- Implement memoization for expensive calculations (e.g., vehicle speed)
+- Profile and optimize rendering performance (e.g., use requestAnimationFrame)
+
+## Milestone 4d - Improve frontend  and DX part deux (Day 4)
+
+- Improve the vehicle marker icons (e.g., use different colors or shapes based on status)
+- Add a legend to explain the marker colors/shapes
+- Implement a more user-friendly way to filter vehicles (e.g., dropdowns, sliders)
+- Add tooltips or popups to markers to show more detailed information about each vehicle
+
 
 ## Milestone 5 — Gatling MQTT Tests (Day 4–5)
 

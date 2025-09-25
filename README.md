@@ -76,11 +76,64 @@ cd fleet-mqtt-demo
    npm run backend
    ```
 
-Environment variables you can override:
+### Simulator configuration
 
-- `BROKER_HOST` / `BROKER_PORT` to point at a remote broker
-- `SIM_TOPIC` to change the simulator publish topic
-- `SUB_TOPIC` to adjust the backend subscription pattern
+The simulator accepts both CLI flags and environment variables (including values inside a `.env` file):
+
+```bash
+npm run simulate -- \
+  --vehicles=500 \
+  --rate=1s \
+  --qos=1 \
+  --jitter=200ms \
+  --region=paris
+```
+
+**CLI flags** (CLI overrides environment variables):
+
+- `--host` / `--port` — MQTT broker connection
+- `--topic` — publish topic (default `fleet/demo/telemetry`)
+- `--qos` — QoS level 0–2
+- `--vehicles` — number of simulated vehicles (default 1)
+- `--rate` — base publish interval (supports `ms`, `s`, `m` suffixes)
+- `--jitter` — random jitter window to add/subtract from the interval
+- `--region` — region label used in generated IDs
+- `--seed` — optional seed to make generated IDs repeatable
+
+**Environment variables** (can be set inline, exported, or via `.env`):
+
+- `BROKER_HOST`, `BROKER_PORT` — broker connection
+- `SIM_HOST`, `SIM_PORT` — aliases for the above
+- `SIM_TOPIC` — publish topic
+- `SIM_QOS` — QoS level
+- `SIM_VEHICLES` — number of vehicles
+- `SIM_RATE` — base publish interval (milliseconds, or with `ms`/`s`/`m` suffix)
+- `SIM_JITTER` — jitter window (same units as `SIM_RATE`)
+- `SIM_REGION` — region label
+- `SIM_SEED` — optional deterministic seed
+- `SUB_TOPIC` — adjusts the backend subscription pattern
+
+Example `.env` snippet:
+
+```dotenv
+BROKER_HOST=localhost
+BROKER_PORT=1883
+SIM_TOPIC=fleet/demo/telemetry
+SIM_VEHICLES=250
+SIM_RATE=750ms
+SIM_REGION=berlin
+```
+
+### Frontend dashboard (Milestone 4)
+
+1. Start the backend (`npm run backend`) so the WebSocket stream (`ws://localhost:8080/stream`) and stats endpoint (`http://localhost:8080/stats`) are available.
+2. Serve the static frontend (any static file server works). For example:
+   ```bash
+   python3 -m http.server 4173 --directory frontend
+   ```
+3. Open `http://localhost:4173` in your browser. The dashboard connects to the backend by default at `http://localhost:8080`; adjust the `window.APP_CONFIG` block in `frontend/index.html` if you host the backend elsewhere.
+
+The UI renders a Leaflet map with live vehicle markers, short position trails, automatic marker clustering for large fleets, and a sidebar showing active vehicles, message throughput, and average latency. WebSocket reconnects use exponential backoff and you can trigger a manual reconnect from the sidebar.
 
 Stop the docker stack when finished:
 ```bash
