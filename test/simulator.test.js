@@ -31,7 +31,7 @@ test('simulator publishes a message with provided options', async () => {
   assert.equal(typeof payload.lng, 'number');
   assert.ok(!Number.isNaN(Date.parse(payload.ts)));
   assert.equal(typeof payload.fuelLevel, 'number');
-  assert.ok(payload.fuelLevel >= 0 && payload.fuelLevel <= 120);
+  assert.ok(payload.fuelLevel >= 0 && payload.fuelLevel <= 100);
   assert.ok(['running', 'idle', 'off'].includes(payload.engineStatus));
 });
 
