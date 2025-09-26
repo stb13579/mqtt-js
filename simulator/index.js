@@ -20,6 +20,10 @@ if (cliTokens.includes('-h') || cliTokens.includes('--help')) {
     `Options:\n` +
     `  --host <hostname>        MQTT broker host (default: localhost)\n` +
     `  --port <number>          MQTT broker port (default: 1883)\n` +
+    `  --username <value>       MQTT username (default: none)\n` +
+    `  --password <value>       MQTT password (default: none)\n` +
+    `  --tls <true|false>       Enable TLS (default: false)\n` +
+    `  --reject-unauthorized <true|false>  Reject invalid TLS certs (default: true)\n` +
     `  --topic <topic>          Telemetry topic (default: fleet/demo/telemetry)\n` +
     `  --qos <0|1|2>            Publish QoS level (default: 0)\n` +
     `  --vehicles <number>      Number of vehicles to simulate (default: 1)\n` +
@@ -30,8 +34,10 @@ if (cliTokens.includes('-h') || cliTokens.includes('--help')) {
     `  --seed <value>           Optional seed for deterministic behaviour\n` +
     `  --help                   Show this message\n` +
     `\nEnvironment variables (take lower precedence than CLI):\n` +
-    `  BROKER_HOST, BROKER_PORT, SIM_TOPIC, SIM_QOS, SIM_VEHICLES,\n` +
-    `  SIM_MAX_MESSAGES, SIM_RATE, SIM_JITTER, SIM_REGION, SIM_SEED, SIM_HOST, SIM_PORT`);
+    `  BROKER_HOST, BROKER_PORT, BROKER_USERNAME, BROKER_PASSWORD, BROKER_TLS,\n` +
+    `  BROKER_TLS_REJECT_UNAUTHORIZED, SIM_TOPIC, SIM_QOS, SIM_VEHICLES,\n` +
+    `  SIM_MAX_MESSAGES, SIM_RATE, SIM_JITTER, SIM_REGION, SIM_SEED, SIM_HOST,\n` +
+    `  SIM_PORT, SIM_USERNAME, SIM_PASSWORD, SIM_TLS, SIM_TLS_REJECT_UNAUTHORIZED`);
   process.exit(0);
 }
 
@@ -44,6 +50,10 @@ if (dotenvResult.error && dotenvResult.error.code !== 'ENOENT') {
 const DEFAULTS = {
   host: 'localhost',
   port: 1883,
+  username: undefined,
+  password: undefined,
+  tls: false,
+  rejectUnauthorized: true,
   topic: 'fleet/demo/telemetry',
   qos: 0,
   vehicles: 1,
@@ -67,6 +77,16 @@ const ENV_ALIASES = {
   seed: ['SIM_SEED']
 };
 
+ENV_ALIASES.username = ['SIM_USERNAME', 'BROKER_USERNAME'];
+ENV_ALIASES.password = ['SIM_PASSWORD', 'BROKER_PASSWORD'];
+ENV_ALIASES.tls = ['SIM_TLS', 'BROKER_TLS'];
+ENV_ALIASES.rejectUnauthorized = ['SIM_TLS_REJECT_UNAUTHORIZED', 'BROKER_TLS_REJECT_UNAUTHORIZED'];
+
+const CLI_KEY_ALIASES = {
+  'max-messages': 'maxMessages',
+  'reject-unauthorized': 'rejectUnauthorized'
+};
+
 const cliArgs = parseCli(cliTokens);
 const config = buildConfig(cliArgs);
 const rng = createRng(config.seed);
@@ -78,15 +98,29 @@ let simulationStarted = false;
 let offlineNotified = false;
 let totalPublished = 0;
 
-const client = mqtt.connect({
-  protocol: 'mqtt',
+const clientOptions = {
+  protocol: config.tls ? 'mqtts' : 'mqtt',
   host: config.host,
   port: config.port,
   reconnectPeriod: 5000,
   connectTimeout: 30_000,
   keepalive: 30,
   queueQoSZero: true
-});
+};
+
+if (config.username) {
+  clientOptions.username = config.username;
+}
+
+if (config.password) {
+  clientOptions.password = config.password;
+}
+
+if (config.tls) {
+  clientOptions.rejectUnauthorized = config.rejectUnauthorized;
+}
+
+const client = mqtt.connect(clientOptions);
 
 client.on('connect', () => {
   offlineNotified = false;
@@ -99,7 +133,11 @@ client.on('connect', () => {
     rate: `${config.rate}ms`,
     jitter: `${config.jitter}ms`,
     region: region.slug,
-    seed: config.seed ?? null
+    seed: config.seed ?? null,
+    protocol: clientOptions.protocol,
+    username: config.username ? '[configured]' : undefined,
+    tls: config.tls,
+    rejectUnauthorized: config.tls ? config.rejectUnauthorized : undefined
   });
 
   if (!simulationStarted) {
@@ -465,6 +503,12 @@ function applyParser(key, value) {
     case 'rate':
     case 'jitter':
       return coerceDuration(key, value);
+    case 'username':
+    case 'password':
+      return value === undefined ? undefined : String(value);
+    case 'tls':
+    case 'rejectUnauthorized':
+      return parseBoolean(value, DEFAULTS[key]);
     default:
       return value;
   }
@@ -529,21 +573,45 @@ function parseCli(tokens) {
 
     if (trimmed.includes('=')) {
       const [key, ...rest] = trimmed.split('=');
-      values[key] = rest.join('=');
+      const normalizedKey = normalizeCliKey(key);
+      values[normalizedKey] = rest.join('=');
       continue;
     }
 
     const next = tokens[i + 1];
     if (!next || next.startsWith('--')) {
-      values[trimmed] = true;
+      const normalizedKey = normalizeCliKey(trimmed);
+      values[normalizedKey] = true;
       continue;
     }
 
-    values[trimmed] = next;
+    const normalizedKey = normalizeCliKey(trimmed);
+    values[normalizedKey] = next;
     i += 1;
   }
 
   return values;
+}
+
+function normalizeCliKey(key) {
+  return CLI_KEY_ALIASES[key] || key;
+}
+
+function parseBoolean(value, defaultValue = false) {
+  if (value === undefined || value === null) {
+    return defaultValue;
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) {
+    return false;
+  }
+  return defaultValue;
 }
 
 function createRng(seed) {

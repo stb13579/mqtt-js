@@ -11,10 +11,16 @@ const ENGINE_STATUS_VALUES = new Set(['running', 'idle', 'off']);
 
 const brokerHost = process.env.BROKER_HOST || 'localhost';
 const brokerPort = Number(process.env.BROKER_PORT || 1883);
+const brokerUsername = envOrNull('BROKER_USERNAME');
+const brokerPassword = envOrNull('BROKER_PASSWORD');
+const brokerUseTls = parseBoolean(process.env.BROKER_TLS, false);
+const brokerRejectUnauthorized = parseBoolean(process.env.BROKER_TLS_REJECT_UNAUTHORIZED, true);
+const brokerClientId = envOrNull('BROKER_CLIENT_ID');
 const subscriptionTopic = process.env.SUB_TOPIC || 'fleet/+/telemetry';
 const httpPort = Number(process.env.PORT || 8080);
 const cacheLimit = Number(process.env.VEHICLE_CACHE_SIZE || 1000);
 const messageWindowMs = Number(process.env.MESSAGE_RATE_WINDOW_MS || 60_000);
+const vehicleTtlMs = parseVehicleTtl(process.env.VEHICLE_TTL_MS, 60_000);
 
 const state = {
   mqttConnected: false,
@@ -22,6 +28,25 @@ const state = {
   invalidMessages: 0,
   messageTimestamps: []
 };
+
+function envOrNull(name) {
+  const value = process.env[name];
+  return value === undefined || value === null || value === '' ? null : value;
+}
+
+function parseBoolean(value, defaultValue) {
+  if (value === undefined || value === null || value === '') {
+    return defaultValue;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'n', 'off'].includes(normalized)) {
+    return false;
+  }
+  return defaultValue;
+}
 
 // WebSocket payloads stay intentionally small; the frontend relies on this schema.
 // Any changes must bump the version and keep fields backward-compatible where possible.
@@ -59,10 +84,19 @@ class VehicleStore {
   values() {
     return this.map.values();
   }
+
+  entries() {
+    return this.map.entries();
+  }
+
+  delete(id) {
+    this.map.delete(id);
+  }
 }
 
 const vehicleStore = new VehicleStore(cacheLimit);
 const wsClients = new Set();
+let expiryTimer = null;
 
 const httpServer = http.createServer((req, res) => {
   const method = req.method || 'GET';
@@ -124,16 +158,51 @@ httpServer.listen(httpPort, () => {
   logger.info({ port: httpPort }, 'HTTP server listening');
 });
 
-const mqttClient = mqtt.connect({
-  protocol: 'mqtt',
+const mqttOptions = {
+  protocol: brokerUseTls ? 'mqtts' : 'mqtt',
   host: brokerHost,
   port: brokerPort,
   keepalive: 30
-});
+};
+
+if (brokerUsername) {
+  mqttOptions.username = brokerUsername;
+}
+
+if (brokerPassword) {
+  mqttOptions.password = brokerPassword;
+}
+
+if (brokerUseTls) {
+  mqttOptions.rejectUnauthorized = brokerRejectUnauthorized;
+}
+
+if (brokerClientId) {
+  mqttOptions.clientId = brokerClientId;
+}
+
+const mqttClient = mqtt.connect(mqttOptions);
+
+if (vehicleTtlMs > 0) {
+  const intervalMs = Math.max(1000, Math.min(vehicleTtlMs, 15_000));
+  expiryTimer = setInterval(() => pruneExpiredVehicles(vehicleTtlMs), intervalMs);
+  if (typeof expiryTimer.unref === 'function') {
+    expiryTimer.unref();
+  }
+  logger.info({ vehicleTtlMs, intervalMs }, 'Vehicle TTL enforcement enabled');
+} else {
+  logger.info('Vehicle TTL enforcement disabled');
+}
 
 mqttClient.on('connect', () => {
   state.mqttConnected = true;
-  logger.info({ host: brokerHost, port: brokerPort, subscriptionTopic }, 'Connected to broker');
+  logger.info({
+    host: brokerHost,
+    port: brokerPort,
+    protocol: mqttOptions.protocol,
+    username: brokerUsername ? '[configured]' : undefined,
+    subscriptionTopic
+  }, 'Connected to broker');
   mqttClient.subscribe(subscriptionTopic, err => {
     if (err) {
       logger.error({ err }, 'Subscription failed');
@@ -332,6 +401,20 @@ function broadcastUpdate(vehicle) {
   }
 }
 
+function broadcastRemoval(vehicleId) {
+  const payload = JSON.stringify({
+    type: 'vehicle_remove',
+    version: WS_PAYLOAD_VERSION,
+    vehicleId
+  });
+
+  for (const socket of wsClients) {
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(payload);
+    }
+  }
+}
+
 function sendSocketUpdate(socket, vehicle) {
   if (socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(formatVehiclePayload(vehicle)));
@@ -365,6 +448,9 @@ function formatVehiclePayload(vehicle) {
 
 function shutdown() {
   logger.info('Shutting down backend');
+  if (expiryTimer) {
+    clearInterval(expiryTimer);
+  }
   wss.close(() => logger.info('WebSocket server closed'));
   httpServer.close(() => logger.info('HTTP server closed'));
   mqttClient.end(false, () => {
@@ -375,3 +461,34 @@ function shutdown() {
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+function parseVehicleTtl(rawValue, defaultValue) {
+  if (rawValue === undefined || rawValue === null || rawValue === '') {
+    return defaultValue;
+  }
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed)) {
+    return defaultValue;
+  }
+  return parsed;
+}
+
+function pruneExpiredVehicles(ttlMs) {
+  const now = Date.now();
+  const expiredIds = [];
+  for (const [vehicleId, vehicle] of vehicleStore.entries()) {
+    const lastSeen = Date.parse(vehicle?.lastSeen);
+    if (!Number.isFinite(lastSeen)) {
+      continue;
+    }
+    if (now - lastSeen >= ttlMs) {
+      expiredIds.push(vehicleId);
+    }
+  }
+
+  for (const vehicleId of expiredIds) {
+    vehicleStore.delete(vehicleId);
+    broadcastRemoval(vehicleId);
+    logger.debug({ vehicleId }, 'Vehicle expired due to TTL and was removed');
+  }
+}

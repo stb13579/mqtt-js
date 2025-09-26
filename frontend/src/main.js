@@ -50,7 +50,8 @@ const CLUSTER_THRESHOLD = config.clusterThreshold ?? 200;
 const MAX_LATENCY_SAMPLES = config.maxLatencySamples ?? 200;
 const RENDER_BATCH_SIZE = Math.max(1, config.renderBatchSize ?? 200);
 const TILE_URL = config.tileUrl || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-const WS_MESSAGE_TYPE = 'vehicle_update';
+const WS_MESSAGE_TYPE_UPDATE = 'vehicle_update';
+const WS_MESSAGE_TYPE_REMOVE = 'vehicle_remove';
 const WS_PAYLOAD_VERSION = 1;
 const DEBUG_RENDER = Boolean(config.debugRenderTimings);
 
@@ -217,13 +218,34 @@ function connectWebSocket() {
   ws.addEventListener('message', event => {
     try {
       const payload = JSON.parse(event.data);
-      if (!isValidPayload(payload)) {
+      if (!payload || typeof payload !== 'object') {
         return;
       }
-      enqueueUpdate({
-        data: payload,
-        receivedAt: Date.now()
-      });
+
+      if (payload.version !== WS_PAYLOAD_VERSION) {
+        console.warn('[frontend] Ignoring message with unsupported version', payload.version);
+        return;
+      }
+
+      switch (payload.type) {
+        case WS_MESSAGE_TYPE_UPDATE:
+          if (!isValidUpdatePayload(payload)) {
+            return;
+          }
+          enqueueUpdate({
+            data: payload,
+            receivedAt: Date.now()
+          });
+          break;
+        case WS_MESSAGE_TYPE_REMOVE:
+          if (!isValidRemovalPayload(payload)) {
+            return;
+          }
+          handleRemovalMessage(payload);
+          break;
+        default:
+          console.warn('[frontend] Unknown WebSocket message type', payload.type);
+      }
     } catch (err) {
       console.error('[frontend] failed to parse update', err);
     }
@@ -466,6 +488,39 @@ function createVehicle(vehicleId) {
 
   vehicles.set(vehicleId, record);
   return record;
+}
+
+function handleRemovalMessage(payload) {
+  removeVehicle(payload.vehicleId);
+}
+
+function removeVehicle(vehicleId) {
+  const record = vehicles.get(vehicleId);
+  if (!record) {
+    return;
+  }
+
+  if (record.visible) {
+    clusterGroup.removeLayer(record.marker);
+    trailLayer.removeLayer(record.polyline);
+    record.marker.closePopup();
+    if (typeof record.marker.closeTooltip === 'function') {
+      record.marker.closeTooltip();
+    }
+    record.visible = false;
+  }
+
+  record.marker.remove();
+  record.polyline.remove();
+  vehicles.delete(vehicleId);
+
+  if (vehicles.size === 0) {
+    initialViewportSettled = false;
+  }
+
+  updateClusterMode();
+  clusterGroup.refreshClusters();
+  updateMetrics();
 }
 
 function updateEntryVisibility(entry) {
@@ -785,11 +840,11 @@ function updateFuelFilterLabel() {
   }
 }
 
-function isValidPayload(payload) {
+function isValidUpdatePayload(payload) {
   if (!payload || typeof payload !== 'object') {
     return false;
   }
-  if (payload.type !== WS_MESSAGE_TYPE || payload.version !== WS_PAYLOAD_VERSION) {
+  if (payload.type !== WS_MESSAGE_TYPE_UPDATE || payload.version !== WS_PAYLOAD_VERSION) {
     return false;
   }
   if (typeof payload.vehicleId !== 'string') {
@@ -799,6 +854,16 @@ function isValidPayload(payload) {
     return false;
   }
   return true;
+}
+
+function isValidRemovalPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return false;
+  }
+  if (payload.type !== WS_MESSAGE_TYPE_REMOVE || payload.version !== WS_PAYLOAD_VERSION) {
+    return false;
+  }
+  return typeof payload.vehicleId === 'string' && payload.vehicleId.length > 0;
 }
 
 function trimTrailingSlash(value) {
