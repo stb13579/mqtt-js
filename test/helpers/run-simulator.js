@@ -33,10 +33,27 @@ async function runSimulator(args, envOverrides = {}) {
   });
 
   const [code] = await once(child, 'exit');
+
+  const trimmedStdout = stdout.trim();
+  const logLines = trimmedStdout === '' ? [] : trimmedStdout.split(/\r?\n/);
+  const jsonLogs = [];
+  for (const line of logLines) {
+    try {
+      jsonLogs.push(JSON.parse(line));
+    } catch (err) {
+      // Ignore non-JSON lines. The simulator is expected to output one JSON log object per line,
+      // but in the future, non-JSON lines (such as human-readable status messages or pretty-printed logs)
+      // may be interleaved with the JSON output. This ensures that the log parser remains robust
+      // if the log format is extended to include such lines.
+    }
+  }
+
   return {
     code,
-    stdout: stdout.trim(),
-    stderr: stderr.trim()
+    stdout: trimmedStdout,
+    stderr: stderr.trim(),
+    logLines,
+    jsonLogs
   };
 }
 

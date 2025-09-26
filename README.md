@@ -143,6 +143,48 @@ npx gatling run --simulation deliveryVehicleSimulation \
 
 Use identical key/value arguments across languages; Gatling resolves them through the `getParameter()` helper. Append `deviceCount=20` or `topic=fleet/demo/telemetry` to override defaults.
 
+## Backend Layout & Configuration
+
+The backend runtime is now composed of small modules that make it easier to test and extend:
+
+```
+backend/
+├── index.js               # Application bootstrap & graceful shutdown
+├── config/
+│   └── index.js           # Environment parsing and logger setup
+├── middleware/
+│   ├── cors.js            # Minimal CORS preflight handling
+│   └── error-handler.js   # Uniform HTTP error responses
+├── routes/
+│   └── api.js             # /healthz, /readyz, /stats endpoints
+├── services/
+│   ├── mqtt-service.js    # Broker subscription and telemetry enrichment
+│   ├── vehicle-store.js   # In-memory cache with TTL eviction
+│   └── websocket-service.js # Stream fan-out and backpressure guardrails
+└── utils/
+    ├── message-metrics.js # Sliding window message rate calculations
+    └── validation.js      # Telemetry schema validation helpers
+```
+
+`backend/config/index.js` centralises defaults for the environment variables listed below. Override them in `.env` or the process environment to change behaviour without touching code.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LOG_LEVEL` | `info` | Pino log level for all backend modules. |
+| `BROKER_HOST` | `localhost` | MQTT broker host. |
+| `BROKER_PORT` | `1883` | MQTT broker port. |
+| `BROKER_USERNAME` / `BROKER_PASSWORD` | empty | Optional broker authentication. |
+| `BROKER_TLS` | `false` | Enable TLS (`mqtts`). |
+| `BROKER_TLS_REJECT_UNAUTHORIZED` | `true` | Validate broker certificates when TLS is enabled. |
+| `BROKER_CLIENT_ID` | empty | Override MQTT client identifier. |
+| `SUB_TOPIC` | `fleet/+/telemetry` | Telemetry subscription topic. |
+| `PORT` | `8080` | HTTP server port for `/healthz`, `/readyz`, `/stats`, and `/stream`. |
+| `VEHICLE_CACHE_SIZE` | `1000` | Maximum vehicles retained in memory before oldest eviction. |
+| `MESSAGE_RATE_WINDOW_MS` | `60000` | Sliding window used to compute messages-per-second. |
+| `VEHICLE_TTL_MS` | `60000` | Time-to-live for inactive vehicles (set to `0` to disable). |
+
+The service-level tests under `test/mqtt-service.test.js`, `test/websocket-service.test.js`, and `test/vehicle-store.test.js` provide focused coverage for telemetry validation, cache expiry, and WebSocket backpressure.
+
 ## Managed MQTT Broker
 
 1. Provision your broker (HiveMQ Cloud, EMQX, Amazon IoT Core, etc.) and collect the host, port, credentials, and TLS requirements.
