@@ -33,10 +33,24 @@ async function runSimulator(args, envOverrides = {}) {
   });
 
   const [code] = await once(child, 'exit');
+
+  const trimmedStdout = stdout.trim();
+  const logLines = trimmedStdout === '' ? [] : trimmedStdout.split(/\r?\n/);
+  const jsonLogs = [];
+  for (const line of logLines) {
+    try {
+      jsonLogs.push(JSON.parse(line));
+    } catch (err) {
+      // Ignore non-JSON lines to support future pretty printing.
+    }
+  }
+
   return {
     code,
-    stdout: stdout.trim(),
-    stderr: stderr.trim()
+    stdout: trimmedStdout,
+    stderr: stderr.trim(),
+    logLines,
+    jsonLogs
   };
 }
 

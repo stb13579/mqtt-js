@@ -9,7 +9,7 @@ import {
   formatSpeed,
   normaliseFiniteNumber,
   normaliseStatus
-} from '../frontend/src/lib/formatting.mjs';
+} from '../frontend/src/utils/formatting.mjs';
 
 test('createMemoizedFormatter caches results and evicts LRU entries', () => {
   let calls = 0;

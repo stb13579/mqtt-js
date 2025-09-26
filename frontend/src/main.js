@@ -1,12 +1,3 @@
-import L from 'leaflet';
-import 'leaflet.markercluster';
-import 'leaflet/dist/leaflet.css';
-import 'leaflet.markercluster/dist/MarkerCluster.css';
-import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
-import markerRetinaAsset from 'leaflet/dist/images/marker-icon-2x.png';
-import markerAsset from 'leaflet/dist/images/marker-icon.png';
-import markerShadowAsset from 'leaflet/dist/images/marker-shadow.png';
-import './styles.css';
 import {
   escapeHtml,
   formatEngineStatus,
@@ -14,60 +5,36 @@ import {
   formatSpeed,
   normaliseFiniteNumber,
   normaliseStatus
-} from './lib/formatting.mjs';
-
-const resolveBundledAsset = asset => {
-  if (!asset) {
-    return asset;
-  }
-  if (/^(?:https?:|data:|blob:)/i.test(asset) || asset.startsWith('/')) {
-    return asset;
-  }
-  try {
-    return new URL(asset, import.meta.url).toString();
-  } catch (_err) {
-    return asset;
-  }
-};
-
-const markerRetinaUrl = resolveBundledAsset(markerRetinaAsset);
-const markerUrl = resolveBundledAsset(markerAsset);
-const markerShadowUrl = resolveBundledAsset(markerShadowAsset);
-
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: markerRetinaUrl,
-  iconUrl: markerUrl,
-  shadowUrl: markerShadowUrl
-});
+} from './utils/formatting.mjs';
+import { createMapController } from './components/map/map-container.mjs';
+import {
+  createVehicleMarker,
+  updateMarkerAppearance
+} from './components/map/vehicle-marker.mjs';
+import { createTrailPolyline, trimTrail } from './components/map/trail-layer.mjs';
+import { createToastManager } from './components/ui/toast.mjs';
+import { createFiltersPanel } from './components/sidebar/filters-panel.mjs';
+import { createMetricsPanel } from './components/sidebar/metrics-panel.mjs';
+import { createWebSocketClient, MESSAGE_TYPES } from './services/websocket-client.mjs';
+import { createStatsClient } from './services/stats-client.mjs';
+import { createFrameThrottler } from './utils/throttle.js';
+import markerRetinaAsset from 'leaflet/dist/images/marker-icon-2x.png';
+import markerAsset from 'leaflet/dist/images/marker-icon.png';
+import markerShadowAsset from 'leaflet/dist/images/marker-shadow.png';
+import './styles.css';
 
 const config = window.APP_CONFIG || {};
 const HTTP_BASE = trimTrailingSlash(config.httpBase || 'http://localhost:8080');
 const WS_URL = config.wsUrl || `${HTTP_BASE.replace(/^http/i, 'ws')}/stream`;
 const STATS_REFRESH_MS = config.statsRefreshMs ?? 5000;
 const RENDER_THROTTLE_MS = config.renderThrottleMs ?? 250;
-const TRAIL_LENGTH = config.trailLength ?? 20;
+const TRAIL_LENGTH = Math.max(1, config.trailLength ?? 20);
 const CLUSTER_THRESHOLD = config.clusterThreshold ?? 200;
 const MAX_LATENCY_SAMPLES = config.maxLatencySamples ?? 200;
 const RENDER_BATCH_SIZE = Math.max(1, config.renderBatchSize ?? 200);
 const TILE_URL = config.tileUrl || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-const WS_MESSAGE_TYPE_UPDATE = 'vehicle_update';
-const WS_MESSAGE_TYPE_REMOVE = 'vehicle_remove';
 const WS_PAYLOAD_VERSION = 1;
 const DEBUG_RENDER = Boolean(config.debugRenderTimings);
-
-const now = () => (
-  typeof performance !== 'undefined' && typeof performance.now === 'function'
-    ? performance.now()
-    : Date.now()
-);
-
-const requestFrame = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
-  ? window.requestAnimationFrame.bind(window)
-  : (cb => setTimeout(() => cb(now()), 16));
-
-const cancelFrame = typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function'
-  ? window.cancelAnimationFrame.bind(window)
-  : clearTimeout;
 
 const elements = {
   connection: document.getElementById('connection-status'),
@@ -82,203 +49,73 @@ const elements = {
   filterStatusButtons: Array.from(document.querySelectorAll('.js-status-filter-btn'))
 };
 
-const STATUS_OPTIONS = ['running', 'idle', 'off'];
+const toast = createToastManager({ container: elements.toastContainer });
 
-const STATUS_STYLES = {
-  running: { accent: '#38bdf8', label: 'Running' },
-  idle: { accent: '#facc15', label: 'Idle' },
-  off: { accent: '#94a3b8', label: 'Off' },
-  unknown: { accent: '#64748b', label: 'Unknown' }
-};
-
-const FUEL_BANDS = {
-  high: { min: 60, color: '#22c55e', label: '60%+' },
-  medium: { min: 30, color: '#f97316', label: '30-59%' },
-  low: { min: 0, color: '#ef4444', label: '<30%' },
-  unknown: { min: -Infinity, color: '#94a3b8', label: 'Unknown' }
-};
-
-const ICON_SIZE = [42, 42];
-
-function getFuelBandKey(value) {
-  if (!Number.isFinite(value)) {
-    return 'unknown';
+const mapController = createMapController({
+  tileUrl: TILE_URL,
+  clusterThreshold: CLUSTER_THRESHOLD,
+  markerAssets: {
+    retina: markerRetinaAsset,
+    standard: markerAsset,
+    shadow: markerShadowAsset
   }
-  if (value >= FUEL_BANDS.high.min) {
-    return 'high';
-  }
-  if (value >= FUEL_BANDS.medium.min) {
-    return 'medium';
-  }
-  if (value >= FUEL_BANDS.low.min) {
-    return 'low';
-  }
-  return 'unknown';
-}
-
-function getStatusKey(value) {
-  const normalised = normaliseStatus(value);
-  if (normalised && STATUS_STYLES[normalised]) {
-    return normalised;
-  }
-  return 'unknown';
-}
-
-function createTruckIcon(fuelBandKey, statusKey) {
-  const band = FUEL_BANDS[fuelBandKey] || FUEL_BANDS.unknown;
-  const status = STATUS_STYLES[statusKey] || STATUS_STYLES.unknown;
-  const html = `
-    <div class="vehicle-marker__wrapper" style="--fuel-color:${band.color}; --status-color:${status.accent};">
-      <svg class="vehicle-marker__svg" viewBox="0 0 64 44" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
-        <path d="M6 14c0-3.314 2.686-6 6-6h22c3.314 0 6 2.686 6 6v16H6V14z" fill="var(--fuel-color)" opacity="0.88" />
-        <path d="M34 14h16c2.21 0 4 1.79 4 4v12H34V14z" fill="var(--fuel-color)" />
-        <path d="M48 14h6c1.657 0 3 1.343 3 3v9h-9V14z" fill="var(--fuel-color)" opacity="0.85" />
-        <path d="M6 30h51l3 4H6v-4z" fill="rgba(15, 23, 42, 0.15)" />
-        <circle cx="18" cy="36" r="6" fill="#0f172a" stroke="#ffffff" stroke-width="2.5" />
-        <circle cx="44" cy="36" r="6" fill="#0f172a" stroke="#ffffff" stroke-width="2.5" />
-        <circle cx="49" cy="18" r="4" fill="var(--status-color)" stroke="#0f172a" stroke-width="2" />
-        <rect x="12" y="22" width="22" height="3" rx="1.5" fill="rgba(15, 23, 42, 0.35)" />
-      </svg>
-    </div>
-  `;
-  return L.divIcon({
-    className: 'vehicle-marker leaflet-div-icon',
-    html: html.trim(),
-    iconSize: ICON_SIZE,
-    iconAnchor: [ICON_SIZE[0] / 2, ICON_SIZE[1] - 10],
-    popupAnchor: [0, -ICON_SIZE[1] + 10],
-    tooltipAnchor: [0, -ICON_SIZE[1] + 8]
-  });
-}
-
-const map = L.map('map', { preferCanvas: true });
-map.setView([48.8566, 2.3522], 5);
-
-L.tileLayer(TILE_URL, {
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-  maxZoom: 19
-}).addTo(map);
-
-const clusterGroup = L.markerClusterGroup({
-  chunkedLoading: true,
-  chunkInterval: 200,
-  disableClusteringAtZoom: 16,
-  maxClusterRadius: 0
 });
 
-const trailLayer = L.layerGroup();
+const metricsPanel = createMetricsPanel({
+  activeElement: elements.active,
+  rateElement: elements.rate,
+  latencyElement: elements.latency,
+  updatedElement: elements.statsUpdated
+});
 
-map.addLayer(clusterGroup);
-map.addLayer(trailLayer);
+const filtersPanel = createFiltersPanel({
+  fuelInput: elements.filterFuel,
+  fuelValueElement: elements.filterFuelValue,
+  statusButtons: elements.filterStatusButtons,
+  toast: (message, variant) => toast.show(message, variant)
+});
+
+const frameThrottler = createFrameThrottler();
 
 const vehicles = new Map();
 const latencySamples = [];
 const updateQueue = [];
-let rafHandle = null;
 let lastFlushTimestamp = 0;
-const MAX_TRAIL_LENGTH = Math.max(1, TRAIL_LENGTH);
-let ws;
-let reconnectAttempts = 0;
-let reconnectTimer = null;
-let skipNextReconnect = false;
-let statsTimer = null;
 let statsFailureNotified = false;
-let initialViewportSettled = false;
 
-const filterState = {
-  minFuel: 0,
-  statuses: new Set(STATUS_OPTIONS)
-};
+const statsClient = createStatsClient({
+  baseUrl: HTTP_BASE,
+  intervalMs: STATS_REFRESH_MS,
+  onData: handleStatsUpdate,
+  onError: handleStatsError,
+  logger: console
+});
 
-connectWebSocket();
-startStatsPolling();
-registerUiHandlers();
+const websocketClient = createWebSocketClient({
+  url: WS_URL,
+  version: WS_PAYLOAD_VERSION,
+  onUpdate: payload => enqueueUpdate({ data: payload, receivedAt: Date.now() }),
+  onRemove: handleRemovalMessage,
+  onError: () => toast.show('WebSocket error occurred. Attempting to reconnect…', 'error'),
+  onStatusChange: setConnectionStatus,
+  logger: console
+});
 
-function connectWebSocket() {
-  clearTimeout(reconnectTimer);
-  setConnectionStatus('connecting');
+filtersPanel.onChange(() => {
+  applyFilters();
+  refreshMetrics();
+});
 
-  let url;
-  try {
-    url = new URL(WS_URL, window.location.href);
-  } catch (err) {
-    console.error('[frontend] invalid WebSocket URL', err);
-    showToast('Invalid WebSocket URL, check configuration.', 'error');
-    return;
-  }
-
-  ws = new WebSocket(url);
-
-  ws.addEventListener('open', () => {
-    setConnectionStatus('connected');
-    reconnectAttempts = 0;
-    skipNextReconnect = false;
-  });
-
-  ws.addEventListener('message', event => {
-    try {
-      const payload = JSON.parse(event.data);
-      if (!payload || typeof payload !== 'object') {
-        return;
-      }
-
-      if (payload.version !== WS_PAYLOAD_VERSION) {
-        console.warn('[frontend] Ignoring message with unsupported version', payload.version);
-        return;
-      }
-
-      switch (payload.type) {
-        case WS_MESSAGE_TYPE_UPDATE:
-          if (!isValidUpdatePayload(payload)) {
-            return;
-          }
-          enqueueUpdate({
-            data: payload,
-            receivedAt: Date.now()
-          });
-          break;
-        case WS_MESSAGE_TYPE_REMOVE:
-          if (!isValidRemovalPayload(payload)) {
-            return;
-          }
-          handleRemovalMessage(payload);
-          break;
-        default:
-          console.warn('[frontend] Unknown WebSocket message type', payload.type);
-      }
-    } catch (err) {
-      console.error('[frontend] failed to parse update', err);
-    }
-  });
-
-  ws.addEventListener('close', () => {
-    setConnectionStatus('disconnected');
-    ws = null;
-    if (skipNextReconnect) {
-      skipNextReconnect = false;
-      connectWebSocket();
-      return;
-    }
-    scheduleReconnect();
-  });
-
-  ws.addEventListener('error', err => {
-    console.error('[frontend] WebSocket error', err);
-    showToast('WebSocket error occurred. Attempting to reconnect…', 'error');
-    try {
-      ws.close();
-    } catch (closeErr) {
-      console.error('[frontend] failed to close socket after error', closeErr);
-    }
+if (elements.reconnectBtn) {
+  elements.reconnectBtn.addEventListener('click', () => {
+    toast.show('Reconnecting WebSocket…', 'info');
+    websocketClient.reconnect();
   });
 }
 
-function scheduleReconnect() {
-  reconnectAttempts = Math.min(reconnectAttempts + 1, 10);
-  const delay = Math.min(1000 * 2 ** (reconnectAttempts - 1), 10000);
-  clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(connectWebSocket, delay);
-}
+websocketClient.connect();
+statsClient.start();
+refreshMetrics();
 
 function enqueueUpdate(entry) {
   updateQueue.push(entry);
@@ -286,14 +123,13 @@ function enqueueUpdate(entry) {
 }
 
 function scheduleFlush() {
-  if (updateQueue.length === 0 || rafHandle !== null) {
+  if (updateQueue.length === 0) {
     return;
   }
-  rafHandle = requestFrame(flushUpdates);
+  frameThrottler.schedule(flushUpdates, RENDER_THROTTLE_MS);
 }
 
-function flushUpdates(frameTime = now()) {
-  rafHandle = null;
+function flushUpdates(frameTime = getNow()) {
   if (frameTime - lastFlushTimestamp < RENDER_THROTTLE_MS) {
     scheduleFlush();
     return;
@@ -323,20 +159,19 @@ function flushUpdates(frameTime = now()) {
   }
 
   let processedVehicles = 0;
-  const frameStart = DEBUG_RENDER ? now() : 0;
-
-  for (const updates of aggregated.values()) {
-    if (applyAggregatedUpdates(updates)) {
+  const frameStart = DEBUG_RENDER ? getNow() : 0;
+  for (const entries of aggregated.values()) {
+    if (applyAggregatedUpdates(entries)) {
       processedVehicles += 1;
     }
   }
 
   if (processedVehicles > 0) {
-    updateClusterMode();
-    clusterGroup.refreshClusters();
-    updateMetrics();
+    refreshMetrics();
+    mapController.updateClusterMode(countVisibleVehicles());
+    mapController.clusterGroup.refreshClusters();
     if (DEBUG_RENDER) {
-      const frameDuration = now() - frameStart;
+      const frameDuration = getNow() - frameStart;
       console.debug(
         `[frontend] processed ${processedVehicles} vehicles in ${frameDuration.toFixed(2)}ms (batch size: ${batch.length})`
       );
@@ -357,30 +192,26 @@ function takeNextBatch(limit) {
 }
 
 function applyAggregatedUpdates(entries) {
-  const normalisedUpdates = [];
-
+  const normalised = [];
   for (const entry of entries) {
-    const normalised = normaliseUpdate(entry);
-    if (normalised) {
-      normalisedUpdates.push(normalised);
+    const result = normaliseUpdate(entry);
+    if (result) {
+      normalised.push(result);
     }
   }
-
-  if (normalisedUpdates.length === 0) {
+  if (normalised.length === 0) {
     return false;
   }
 
-  const latest = normalisedUpdates[normalisedUpdates.length - 1];
+  const latest = normalised[normalised.length - 1];
   let record = vehicles.get(latest.vehicleId);
   if (!record) {
-    record = createVehicle(latest.vehicleId);
+    record = createVehicle(latest.vehicleId, latest.position);
   }
 
-  for (const update of normalisedUpdates) {
+  for (const update of normalised) {
     record.trail.push(update.position);
-    if (record.trail.length > MAX_TRAIL_LENGTH) {
-      record.trail.splice(0, record.trail.length - MAX_TRAIL_LENGTH);
-    }
+    record.trail = trimTrail(record.trail, TRAIL_LENGTH);
     if (update.timestamp) {
       record.lastTimestamp = update.timestamp;
     }
@@ -400,20 +231,12 @@ function applyAggregatedUpdates(entries) {
 
   record.marker.setLatLng(latest.position);
   record.polyline.setLatLngs(record.trail);
-  updateMarkerAppearance(record);
-  record.marker.setPopupContent(renderPopup({
-    vehicleId: latest.vehicleId,
-    speed: record.lastSpeed,
-    timestamp: record.lastTimestamp,
+  updateMarkerAppearance(record.marker, {
     fuelLevel: record.lastFuelLevel,
     engineStatus: record.lastEngineStatus
-  }));
-  record.marker.setTooltipContent(renderTooltip({
-    vehicleId: latest.vehicleId,
-    speed: record.lastSpeed,
-    fuelLevel: record.lastFuelLevel,
-    engineStatus: record.lastEngineStatus
-  }));
+  });
+  record.marker.setPopupContent(renderPopup(record));
+  record.marker.setTooltipContent(renderTooltip(record));
 
   updateEntryVisibility(record);
   return true;
@@ -452,37 +275,27 @@ function normaliseUpdate(entry) {
     timestamp,
     latencyMs,
     speed: normaliseFiniteNumber(telemetry.speed),
-    fuelLevel: normaliseFiniteNumber(telemetry.fuelLevel ?? filters.fuelLevel),
-    engineStatus: normaliseStatus(telemetry.engineStatus ?? filters.engineStatus)
+    fuelLevel: normaliseFiniteNumber(telemetry.fuelLevel),
+    engineStatus: normaliseStatus(filters.engineStatus ?? telemetry.engineStatus),
+    raw: data
   };
 }
 
-function createVehicle(vehicleId) {
-  const marker = L.marker([0, 0], { title: vehicleId });
-  const defaultIconKey = 'unknown:unknown';
-  marker.setIcon(createTruckIcon('unknown', 'unknown'));
-  marker.bindPopup('');
-  marker.bindTooltip('', {
-    direction: 'top',
-    sticky: true,
-    className: 'vehicle-tooltip'
-  });
-
-  const polyline = L.polyline([], {
-    color: '#38bdf8',
-    weight: 2,
-    opacity: 0.7
-  });
+function createVehicle(vehicleId, initialPosition) {
+  const marker = createVehicleMarker(initialPosition);
+  const polyline = createTrailPolyline([]);
+  marker.bindPopup('', { closeButton: true });
+  marker.bindTooltip('', { direction: 'top', offset: [0, -32], permanent: false });
 
   const record = {
+    vehicleId,
     marker,
     polyline,
-    trail: [],
+    trail: Array.isArray(initialPosition) ? [initialPosition] : [],
     lastTimestamp: null,
     lastSpeed: null,
     lastFuelLevel: null,
     lastEngineStatus: null,
-    iconKey: defaultIconKey,
     visible: false
   };
 
@@ -490,60 +303,80 @@ function createVehicle(vehicleId) {
   return record;
 }
 
-function handleRemovalMessage(payload) {
-  removeVehicle(payload.vehicleId);
-}
-
-function removeVehicle(vehicleId) {
-  const record = vehicles.get(vehicleId);
-  if (!record) {
-    return;
-  }
-
-  if (record.visible) {
-    clusterGroup.removeLayer(record.marker);
-    trailLayer.removeLayer(record.polyline);
-    record.marker.closePopup();
-    if (typeof record.marker.closeTooltip === 'function') {
-      record.marker.closeTooltip();
-    }
-    record.visible = false;
-  }
-
-  record.marker.remove();
-  record.polyline.remove();
-  vehicles.delete(vehicleId);
-
-  if (vehicles.size === 0) {
-    initialViewportSettled = false;
-  }
-
-  updateClusterMode();
-  clusterGroup.refreshClusters();
-  updateMetrics();
-}
-
 function updateEntryVisibility(entry) {
-  const shouldShow = matchesFilters(entry);
+  const shouldShow = filtersPanel.matches({
+    fuelLevel: entry.lastFuelLevel,
+    engineStatus: entry.lastEngineStatus
+  });
 
   if (shouldShow && !entry.visible) {
-    clusterGroup.addLayer(entry.marker);
-    trailLayer.addLayer(entry.polyline);
+    mapController.clusterGroup.addLayer(entry.marker);
+    mapController.trailLayer.addLayer(entry.polyline);
     entry.visible = true;
-    applyInitialViewport(entry.marker.getLatLng());
+    mapController.applyInitialViewport(getVisibleLatLngs());
   } else if (!shouldShow && entry.visible) {
-    clusterGroup.removeLayer(entry.marker);
-    trailLayer.removeLayer(entry.polyline);
+    mapController.clusterGroup.removeLayer(entry.marker);
+    mapController.trailLayer.removeLayer(entry.polyline);
     entry.marker.closePopup();
     entry.visible = false;
   }
 }
 
-function matchesFilters(entry) {
-  const meetsFuel = entry.lastFuelLevel === null || entry.lastFuelLevel >= filterState.minFuel;
-  const status = entry.lastEngineStatus;
-  const meetsStatus = !status || filterState.statuses.has(status);
-  return meetsFuel && meetsStatus;
+function handleRemovalMessage(payload) {
+  if (payload.version !== WS_PAYLOAD_VERSION || payload.type !== MESSAGE_TYPES.REMOVE) {
+    return;
+  }
+  const vehicleId = typeof payload.vehicleId === 'string' ? payload.vehicleId : null;
+  if (!vehicleId) {
+    return;
+  }
+  const record = vehicles.get(vehicleId);
+  if (!record) {
+    return;
+  }
+
+  mapController.clusterGroup.removeLayer(record.marker);
+  mapController.trailLayer.removeLayer(record.polyline);
+  record.marker.remove();
+  record.polyline.remove();
+  vehicles.delete(vehicleId);
+
+  if (vehicles.size === 0) {
+    mapController.resetViewport();
+  }
+
+  refreshMetrics();
+  mapController.updateClusterMode(countVisibleVehicles());
+}
+
+function handleStatsUpdate(stats) {
+  if (typeof stats.messageRatePerSecond === 'number') {
+    metricsPanel.updateRate(stats.messageRatePerSecond);
+  }
+  metricsPanel.markUpdated(new Date());
+  statsFailureNotified = false;
+}
+
+function handleStatsError() {
+  if (!statsFailureNotified) {
+    toast.show('Unable to fetch /stats from backend.', 'warn');
+    statsFailureNotified = true;
+  }
+}
+
+function refreshMetrics() {
+  metricsPanel.updateActive({
+    visible: countVisibleVehicles(),
+    total: vehicles.size
+  });
+  metricsPanel.updateLatency(getAverageLatency());
+}
+
+function applyFilters() {
+  for (const entry of vehicles.values()) {
+    updateEntryVisibility(entry);
+  }
+  mapController.updateClusterMode(countVisibleVehicles());
 }
 
 function countVisibleVehicles() {
@@ -556,69 +389,24 @@ function countVisibleVehicles() {
   return count;
 }
 
-function getVisibleEntries() {
-  return Array.from(vehicles.values()).filter(entry => entry.visible);
-}
-
-function applyFilters() {
+function getVisibleLatLngs() {
+  const positions = [];
   for (const entry of vehicles.values()) {
-    updateEntryVisibility(entry);
+    if (entry.visible) {
+      positions.push(entry.marker.getLatLng());
+    }
   }
-  updateClusterMode();
-  clusterGroup.refreshClusters();
-  updateMetrics();
-  updateStatusFilterButtons();
+  return positions;
 }
 
-function applyInitialViewport(position) {
-  if (initialViewportSettled) {
-    return;
-  }
-
-  const visibleEntries = getVisibleEntries();
-  if (visibleEntries.length === 0) {
-    return;
-  }
-
-  if (visibleEntries.length === 1 && position) {
-    map.setView(position, 12);
-    return;
-  }
-
-  if (visibleEntries.length >= 2) {
-    const bounds = L.latLngBounds(visibleEntries.map(entry => entry.marker.getLatLng()));
-    map.fitBounds(bounds.pad(0.25));
-    initialViewportSettled = true;
-  }
-}
-
-function updateClusterMode() {
-  const visibleCount = countVisibleVehicles();
-  const shouldCluster = visibleCount > CLUSTER_THRESHOLD;
-  const desiredRadius = shouldCluster ? 80 : 0;
-  if (clusterGroup.options.maxClusterRadius !== desiredRadius) {
-    clusterGroup.options.maxClusterRadius = desiredRadius;
-  }
-}
-
-function updateMarkerAppearance(record) {
-  const fuelBandKey = getFuelBandKey(record.lastFuelLevel);
-  const statusKey = getStatusKey(record.lastEngineStatus);
-  const nextIconKey = `${fuelBandKey}:${statusKey}`;
-  if (nextIconKey !== record.iconKey) {
-    record.marker.setIcon(createTruckIcon(fuelBandKey, statusKey));
-    record.iconKey = nextIconKey;
-  }
-}
-
-function renderPopup({ vehicleId, speed, timestamp, fuelLevel, engineStatus }) {
-  const safeId = escapeHtml(vehicleId);
-  const speedText = formatSpeed(speed);
-  const timeText = timestamp && !Number.isNaN(timestamp.valueOf())
-    ? timestamp.toLocaleString()
+function renderPopup(record) {
+  const safeId = escapeHtml(record.vehicleId);
+  const speedText = formatSpeed(record.lastSpeed ?? Number.NaN);
+  const timeText = record.lastTimestamp && !Number.isNaN(record.lastTimestamp.valueOf())
+    ? record.lastTimestamp.toLocaleString()
     : 'Unknown time';
-  const fuelText = formatFuelLevel(fuelLevel);
-  const engineText = formatEngineStatus(engineStatus);
+  const fuelText = formatFuelLevel(record.lastFuelLevel ?? Number.NaN);
+  const engineText = formatEngineStatus(record.lastEngineStatus ?? '');
   return `
     <strong>${safeId}</strong><br>
     <span>Speed: ${speedText}</span><br>
@@ -628,11 +416,11 @@ function renderPopup({ vehicleId, speed, timestamp, fuelLevel, engineStatus }) {
   `;
 }
 
-function renderTooltip({ vehicleId, fuelLevel, engineStatus, speed }) {
-  const safeId = escapeHtml(vehicleId);
-  const fuelText = escapeHtml(String(formatFuelLevel(fuelLevel)));
-  const engineText = escapeHtml(String(formatEngineStatus(engineStatus)));
-  const speedText = escapeHtml(String(formatSpeed(speed)));
+function renderTooltip(record) {
+  const safeId = escapeHtml(record.vehicleId);
+  const fuelText = escapeHtml(String(formatFuelLevel(record.lastFuelLevel ?? Number.NaN)));
+  const engineText = escapeHtml(String(formatEngineStatus(record.lastEngineStatus ?? '')));
+  const speedText = escapeHtml(String(formatSpeed(record.lastSpeed ?? Number.NaN)));
   return `
     <div class="vehicle-tooltip__content">
       <strong>${safeId}</strong>
@@ -641,18 +429,6 @@ function renderTooltip({ vehicleId, fuelLevel, engineStatus, speed }) {
       <div>Speed: ${speedText}</div>
     </div>
   `.trim();
-}
-
-function updateMetrics() {
-  const total = vehicles.size;
-  const visible = countVisibleVehicles();
-  elements.active.textContent = visible === total || total === 0
-    ? `${visible}`
-    : `${visible} / ${total}`;
-  const averageLatency = getAverageLatency();
-  elements.latency.textContent = averageLatency === null
-    ? '—'
-    : `${Math.round(averageLatency)} ms`;
 }
 
 function addLatencySample(value) {
@@ -673,211 +449,33 @@ function getAverageLatency() {
   return sum / latencySamples.length;
 }
 
-function startStatsPolling() {
-  clearInterval(statsTimer);
-  fetchAndUpdateStats();
-  statsTimer = setInterval(fetchAndUpdateStats, STATS_REFRESH_MS);
-}
-
-async function fetchAndUpdateStats() {
-  try {
-    const response = await fetch(`${HTTP_BASE}/stats`, { cache: 'no-store' });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const stats = await response.json();
-    if (typeof stats.messageRatePerSecond === 'number') {
-      elements.rate.textContent = stats.messageRatePerSecond.toFixed(2);
-    }
-    elements.statsUpdated.textContent = new Date().toLocaleTimeString();
-    statsFailureNotified = false;
-  } catch (err) {
-    console.error('[frontend] failed to fetch stats', err);
-    if (!statsFailureNotified) {
-      showToast('Unable to fetch /stats from backend.', 'warn');
-      statsFailureNotified = true;
-    }
-  }
-}
-
-function setConnectionStatus(state) {
+function setConnectionStatus(status) {
   const el = elements.connection;
+  if (!el) {
+    return;
+  }
   el.classList.remove('status--connected', 'status--disconnected', 'status--connecting');
   const labelMap = {
     connected: 'Connected',
     disconnected: 'Disconnected',
     connecting: 'Connecting…'
   };
-  el.classList.add(`status--${state}`);
-  el.textContent = labelMap[state] || state;
-}
-
-function registerUiHandlers() {
-  elements.reconnectBtn.addEventListener('click', () => {
-    showToast('Reconnecting WebSocket…', 'info');
-    skipNextReconnect = true;
-    reconnectAttempts = 0;
-    if (ws && ws.readyState <= WebSocket.OPEN) {
-      try {
-        ws.close(1000, 'manual reconnect');
-      } catch (err) {
-        console.error('[frontend] failed to close socket on manual reconnect', err);
-        connectWebSocket();
-      }
-    } else {
-      connectWebSocket();
-    }
-  });
-
-  if (elements.filterFuel) {
-    const fuelValue = Number(elements.filterFuel.value);
-    filterState.minFuel = Number.isFinite(fuelValue) ? fuelValue : filterState.minFuel;
-    elements.filterFuel.addEventListener('input', event => {
-      const nextValue = Number(event.target.value);
-      filterState.minFuel = Number.isFinite(nextValue) ? nextValue : 0;
-      updateFuelFilterLabel();
-      applyFilters();
-    });
-  }
-
-  updateFuelFilterLabel();
-  updateStatusFilterButtons();
-
-  if (elements.filterStatusButtons.length > 0) {
-    elements.filterStatusButtons.forEach(button => {
-      button.addEventListener('click', () => {
-        handleStatusFilterButton(button);
-      });
-    });
-  }
-}
-
-function showToast(message, variant = 'info') {
-  const container = elements.toastContainer;
-  if (!container) {
-    return;
-  }
-  const toast = document.createElement('div');
-  toast.className = `toast toast--${variant}`;
-  toast.textContent = message;
-  container.appendChild(toast);
-  setTimeout(() => {
-    toast.classList.add('toast--hide');
-    setTimeout(() => toast.remove(), 250);
-  }, 4000);
-}
-
-
-function handleStatusFilterButton(button) {
-  if (!button) {
-    return;
-  }
-  const { status } = button.dataset;
-  if (!status) {
-    return;
-  }
-
-  if (status === 'all') {
-    if (filterState.statuses.size !== STATUS_OPTIONS.length) {
-      filterState.statuses = new Set(STATUS_OPTIONS);
-      applyFilters();
-    }
-    return;
-  }
-
-  const statusKey = getStatusKey(status);
-  if (statusKey === 'unknown') {
-    return;
-  }
-
-  const isActive = filterState.statuses.has(statusKey);
-  if (isActive && filterState.statuses.size === 1) {
-    showToast('At least one engine status must remain selected.', 'warn');
-    return;
-  }
-
-  if (isActive) {
-    filterState.statuses.delete(statusKey);
-  } else {
-    filterState.statuses.add(statusKey);
-  }
-
-  applyFilters();
-}
-
-function updateStatusFilterButtons() {
-  if (!elements.filterStatusButtons || elements.filterStatusButtons.length === 0) {
-    return;
-  }
-  const allActive = filterState.statuses.size === STATUS_OPTIONS.length;
-  elements.filterStatusButtons.forEach(button => {
-    const { status } = button.dataset;
-    if (status === 'all') {
-      setStatusButtonState(button, allActive);
-      return;
-    }
-    const statusKey = getStatusKey(status);
-    const isActive = statusKey !== 'unknown' && filterState.statuses.has(statusKey);
-    setStatusButtonState(button, isActive);
-  });
-}
-
-function setStatusButtonState(button, isActive) {
-  if (!button) {
-    return;
-  }
-  button.classList.toggle('is-active', Boolean(isActive));
-  button.setAttribute('aria-pressed', String(Boolean(isActive)));
-}
-
-
-function updateFuelFilterLabel() {
-  if (elements.filterFuelValue) {
-    elements.filterFuelValue.textContent = `${filterState.minFuel}%`;
-  }
-  if (elements.filterFuel) {
-    elements.filterFuel.value = String(filterState.minFuel);
-  }
-}
-
-function isValidUpdatePayload(payload) {
-  if (!payload || typeof payload !== 'object') {
-    return false;
-  }
-  if (payload.type !== WS_MESSAGE_TYPE_UPDATE || payload.version !== WS_PAYLOAD_VERSION) {
-    return false;
-  }
-  if (typeof payload.vehicleId !== 'string') {
-    return false;
-  }
-  if (!payload.position || !payload.telemetry) {
-    return false;
-  }
-  return true;
-}
-
-function isValidRemovalPayload(payload) {
-  if (!payload || typeof payload !== 'object') {
-    return false;
-  }
-  if (payload.type !== WS_MESSAGE_TYPE_REMOVE || payload.version !== WS_PAYLOAD_VERSION) {
-    return false;
-  }
-  return typeof payload.vehicleId === 'string' && payload.vehicleId.length > 0;
+  el.classList.add(`status--${status}`);
+  el.textContent = labelMap[status] || status;
 }
 
 function trimTrailingSlash(value) {
   return value.endsWith('/') ? value.slice(0, -1) : value;
 }
 
+function getNow() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}
+
 window.addEventListener('beforeunload', () => {
-  clearTimeout(reconnectTimer);
-  clearInterval(statsTimer);
-  if (rafHandle !== null) {
-    cancelFrame(rafHandle);
-    rafHandle = null;
-  }
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.close();
-  }
+  frameThrottler.cancel();
+  statsClient.stop();
+  websocketClient.destroy();
 });

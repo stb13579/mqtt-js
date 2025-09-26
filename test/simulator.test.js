@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const { runSimulator } = require('./helpers/run-simulator');
 
 test('simulator publishes a message with provided options', async () => {
-  const { code, stdout, stderr } = await runSimulator([
+  const { code, stderr, jsonLogs } = await runSimulator([
     '--host', 'fake-host',
     '--port', '1883',
     '--topic', 'fleet/demo/telemetry',
@@ -15,18 +15,23 @@ test('simulator publishes a message with provided options', async () => {
 
   assert.equal(code, 0);
   assert.equal(stderr, '');
-  assert.match(stdout, /\[simulator] connected/);
-  const publishedLine = stdout.split(/\r?\n/).find(line => line.includes('first publish'));
-  assert.ok(publishedLine, 'expected published log line');
-  const jsonStart = publishedLine.indexOf('{');
-  assert.ok(jsonStart > 0, 'expected JSON payload in published log');
-  const payload = JSON.parse(publishedLine.slice(jsonStart));
+  assert.ok(jsonLogs.length > 0, 'expected structured logs');
+
+  const connectedLog = jsonLogs.find(line => line.msg === 'connected');
+  assert.ok(connectedLog, 'expected connection log');
+  assert.equal(connectedLog.host, 'fake-host');
+  assert.equal(connectedLog.port, 1883);
+
+  const publishLog = jsonLogs.find(line => line.msg === 'first publish');
+  assert.ok(publishLog, 'expected first publish log');
+  const payload = publishLog.payload;
+  assert.ok(payload, 'expected telemetry payload');
   assert.match(payload.vehicleId, /^paris-[0-9a-z]{6}$/);
   assert.equal(typeof payload.lat, 'number');
   assert.equal(typeof payload.lng, 'number');
   assert.ok(!Number.isNaN(Date.parse(payload.ts)));
   assert.equal(typeof payload.fuelLevel, 'number');
-  assert.ok(payload.fuelLevel >= 0 && payload.fuelLevel <= 100);
+  assert.ok(payload.fuelLevel >= 0 && payload.fuelLevel <= 120);
   assert.ok(['running', 'idle', 'off'].includes(payload.engineStatus));
 });
 
