@@ -17,7 +17,7 @@ const VEHICLE_TYPES = {
     name: 'Long Haul Freight',
     cruiseSpeedKmh: [25, 55],
     maxSpeedKmh: [70, 110],
-    fuelLevel: [75, 120],
+    fuelLevel: [75, 100],
     radiusMultiplier: [1.5, 2.3]
   }
 };
