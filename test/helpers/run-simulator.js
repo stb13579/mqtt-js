@@ -41,7 +41,10 @@ async function runSimulator(args, envOverrides = {}) {
     try {
       jsonLogs.push(JSON.parse(line));
     } catch (err) {
-      // Ignore non-JSON lines to support future pretty printing.
+      // Ignore non-JSON lines. The simulator is expected to output one JSON log object per line,
+      // but in the future, non-JSON lines (such as human-readable status messages or pretty-printed logs)
+      // may be interleaved with the JSON output. This ensures that the log parser remains robust
+      // if the log format is extended to include such lines.
     }
   }
 
