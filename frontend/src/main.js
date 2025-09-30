@@ -17,6 +17,7 @@ import { createFiltersPanel } from './components/sidebar/filters-panel.mjs';
 import { createMetricsPanel } from './components/sidebar/metrics-panel.mjs';
 import { createWebSocketClient, MESSAGE_TYPES } from './services/websocket-client.mjs';
 import { createStatsClient } from './services/stats-client.mjs';
+import { fetchTelemetrySummary, fetchTelemetryHistory } from './services/telemetry-api.mjs';
 import { createFrameThrottler } from './utils/throttle.js';
 import markerRetinaAsset from 'leaflet/dist/images/marker-icon-2x.png';
 import markerAsset from 'leaflet/dist/images/marker-icon.png';
@@ -35,18 +36,30 @@ const RENDER_BATCH_SIZE = Math.max(1, config.renderBatchSize ?? 200);
 const TILE_URL = config.tileUrl || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const WS_PAYLOAD_VERSION = 1;
 const DEBUG_RENDER = Boolean(config.debugRenderTimings);
+const SUMMARY_WINDOW_SECONDS = config.summaryWindowSeconds ?? 900;
+const SUMMARY_DURATION_SECONDS = config.summaryDurationSeconds ?? SUMMARY_WINDOW_SECONDS;
+const SUMMARY_REFRESH_MS = config.summaryRefreshMs ?? 60_000;
+const HISTORY_DURATION_SECONDS = config.historyDurationSeconds ?? 900;
+const HISTORY_REFRESH_MS = config.historyRefreshMs ?? 45_000;
+const HISTORY_LIMIT = Math.max(1, config.historyLimit ?? 20);
+const distanceFormatter = new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
 const elements = {
   connection: document.getElementById('connection-status'),
   active: document.getElementById('metric-active'),
   rate: document.getElementById('metric-rate'),
   latency: document.getElementById('metric-latency'),
+  avgSpeed: document.getElementById('metric-avg-speed'),
+  maxSpeed: document.getElementById('metric-max-speed'),
+  distance: document.getElementById('metric-distance'),
   statsUpdated: document.getElementById('stats-updated'),
   reconnectBtn: document.getElementById('reconnect-btn'),
   toastContainer: document.getElementById('toast-container'),
   filterFuel: document.getElementById('filter-fuel'),
   filterFuelValue: document.getElementById('filter-fuel-value'),
-  filterStatusButtons: Array.from(document.querySelectorAll('.js-status-filter-btn'))
+  filterStatusButtons: Array.from(document.querySelectorAll('.js-status-filter-btn')),
+  historyWindow: document.getElementById('history-window'),
+  historyBody: document.getElementById('history-body')
 };
 
 const toast = createToastManager({ container: elements.toastContainer });
@@ -82,6 +95,10 @@ const latencySamples = [];
 const updateQueue = [];
 let lastFlushTimestamp = 0;
 let statsFailureNotified = false;
+let summaryTimer = null;
+let historyTimer = null;
+let summaryFailureNotified = false;
+let historyFailureNotified = false;
 
 const statsClient = createStatsClient({
   baseUrl: HTTP_BASE,
@@ -116,6 +133,8 @@ if (elements.reconnectBtn) {
 websocketClient.connect();
 statsClient.start();
 refreshMetrics();
+startTelemetrySummaryPoller();
+startTelemetryHistoryPoller();
 
 function enqueueUpdate(entry) {
   updateQueue.push(entry);
@@ -364,6 +383,130 @@ function handleStatsError() {
   }
 }
 
+function startTelemetrySummaryPoller() {
+  if (summaryTimer) {
+    clearInterval(summaryTimer);
+  }
+  void refreshTelemetrySummary();
+  summaryTimer = setInterval(refreshTelemetrySummary, SUMMARY_REFRESH_MS);
+}
+
+async function refreshTelemetrySummary() {
+  try {
+    const data = await fetchTelemetrySummary({
+      baseUrl: HTTP_BASE,
+      windowSeconds: SUMMARY_WINDOW_SECONDS,
+      durationSeconds: SUMMARY_DURATION_SECONDS
+    });
+    updateSummaryMetrics(data);
+    summaryFailureNotified = false;
+  } catch (err) {
+    console.error('[frontend] telemetry summary failed', err);
+    if (!summaryFailureNotified) {
+      toast.show('Unable to load gRPC summary metrics.', 'warn');
+      summaryFailureNotified = true;
+    }
+  }
+}
+
+function updateSummaryMetrics(payload) {
+  if (!payload) {
+    return;
+  }
+  const metrics = payload.metrics || {};
+  setMetricText(elements.avgSpeed, metrics.avgSpeedKmh, value => formatSpeed(value ?? Number.NaN));
+  setMetricText(elements.maxSpeed, metrics.maxSpeedKmh, value => formatSpeed(value ?? Number.NaN));
+  setMetricText(elements.distance, metrics.totalDistanceKm, formatDistance);
+}
+
+function setMetricText(element, value, formatter, fallback = '—') {
+  if (!element) {
+    return;
+  }
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    element.textContent = fallback;
+    return;
+  }
+  element.textContent = typeof formatter === 'function' ? formatter(Number(value)) : String(value);
+}
+
+function startTelemetryHistoryPoller() {
+  if (historyTimer) {
+    clearInterval(historyTimer);
+  }
+  void refreshTelemetryHistory();
+  historyTimer = setInterval(refreshTelemetryHistory, HISTORY_REFRESH_MS);
+}
+
+async function refreshTelemetryHistory() {
+  try {
+    const data = await fetchTelemetryHistory({
+      baseUrl: HTTP_BASE,
+      durationSeconds: HISTORY_DURATION_SECONDS,
+      limit: HISTORY_LIMIT
+    });
+    updateHistoryTable(data);
+    historyFailureNotified = false;
+  } catch (err) {
+    console.error('[frontend] telemetry history failed', err);
+    if (!historyFailureNotified) {
+      toast.show('Unable to load recent telemetry history.', 'warn');
+      historyFailureNotified = true;
+    }
+  }
+}
+
+function updateHistoryTable(payload) {
+  if (!elements.historyBody) {
+    return;
+  }
+
+  const events = Array.isArray(payload?.events) ? payload.events : [];
+  updateHistoryWindow(payload?.range);
+
+  if (events.length === 0) {
+    elements.historyBody.innerHTML = '<tr class="history-table__placeholder"><td colspan="5">No telemetry yet</td></tr>';
+    return;
+  }
+
+  const rows = events.map(buildHistoryRow).join('');
+  elements.historyBody.innerHTML = rows;
+}
+
+function updateHistoryWindow(range) {
+  if (!elements.historyWindow) {
+    return;
+  }
+  if (!range?.start || !range?.end) {
+    elements.historyWindow.textContent = '';
+    return;
+  }
+  const start = new Date(range.start);
+  const end = new Date(range.end);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    elements.historyWindow.textContent = '';
+    return;
+  }
+  elements.historyWindow.textContent = `${start.toLocaleTimeString()} – ${end.toLocaleTimeString()}`;
+}
+
+function buildHistoryRow(event) {
+  const vehicleId = escapeHtml(event.vehicleId || 'unknown');
+  const recorded = escapeHtml(formatRecordedTime(event.recordedAt));
+  const speed = escapeHtml(formatSpeed(event.speedKmh));
+  const fuel = escapeHtml(formatFuelLevel(event.fuelLevel));
+  const engine = formatEngineStatus(event.engineStatus || '');
+  return `
+    <tr>
+      <td>${vehicleId}</td>
+      <td>${recorded}</td>
+      <td>${speed}</td>
+      <td>${fuel}</td>
+      <td>${engine}</td>
+    </tr>
+  `;
+}
+
 function refreshMetrics() {
   metricsPanel.updateActive({
     visible: countVisibleVehicles(),
@@ -431,6 +574,24 @@ function renderTooltip(record) {
   `.trim();
 }
 
+function formatDistance(value) {
+  if (!Number.isFinite(value)) {
+    return '—';
+  }
+  return `${distanceFormatter.format(value)} km`;
+}
+
+function formatRecordedTime(input) {
+  if (!input) {
+    return 'Unknown';
+  }
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) {
+    return 'Unknown';
+  }
+  return date.toLocaleString();
+}
+
 function addLatencySample(value) {
   if (!Number.isFinite(value)) {
     return;
@@ -478,4 +639,12 @@ window.addEventListener('beforeunload', () => {
   frameThrottler.cancel();
   statsClient.stop();
   websocketClient.destroy();
+  if (summaryTimer) {
+    clearInterval(summaryTimer);
+    summaryTimer = null;
+  }
+  if (historyTimer) {
+    clearInterval(historyTimer);
+    historyTimer = null;
+  }
 });

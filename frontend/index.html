@@ -36,6 +36,18 @@
           <span class="metric__label">Average latency</span>
           <span class="metric__value" id="metric-latency">—</span>
         </div>
+        <div class="metric">
+          <span class="metric__label">Avg speed (last 15 min)</span>
+          <span class="metric__value" id="metric-avg-speed">—</span>
+        </div>
+        <div class="metric">
+          <span class="metric__label">Top speed (last 15 min)</span>
+          <span class="metric__value" id="metric-max-speed">—</span>
+        </div>
+        <div class="metric">
+          <span class="metric__label">Distance (last 15 min)</span>
+          <span class="metric__value" id="metric-distance">—</span>
+        </div>
       </section>
       <section class="filters">
         <h2>Filters</h2>
@@ -71,6 +83,28 @@
       <section class="meta">
         <p class="meta__item">Stats updated <span id="stats-updated">never</span></p>
         <button id="reconnect-btn" type="button" class="button">Reconnect</button>
+      </section>
+      <section class="history">
+        <div class="history__header">
+          <h2>Recent telemetry</h2>
+          <span class="history__window" id="history-window"></span>
+        </div>
+        <table class="history-table" aria-live="polite">
+          <thead>
+            <tr>
+              <th scope="col">Vehicle</th>
+              <th scope="col">Recorded</th>
+              <th scope="col">Speed</th>
+              <th scope="col">Fuel</th>
+              <th scope="col">Engine</th>
+            </tr>
+          </thead>
+          <tbody id="history-body">
+            <tr class="history-table__placeholder">
+              <td colspan="5">Gathering recent telemetry…</td>
+            </tr>
+          </tbody>
+        </table>
       </section>
     </aside>
     <div class="map-container">

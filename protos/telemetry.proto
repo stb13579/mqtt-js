@@ -1,0 +1,114 @@
+syntax = "proto3";
+
+package telemetry.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// TelemetryService groups gRPC methods used by dashboards, Gatling scenarios,
+// and backend workers. Each RPC is annotated to show whether it depends on
+// historical storage or only the current in-memory view of the fleet.
+service TelemetryService {
+  // LIVE AGGREGATE: served from the backend's in-memory VehicleStore and stats.
+  rpc GetFleetSnapshot(GetFleetSnapshotRequest) returns (GetFleetSnapshotResponse);
+
+  // LIVE STREAM: pushes near-real-time updates for the selected vehicles.
+  rpc StreamVehicleSnapshots(StreamVehicleSnapshotsRequest)
+      returns (stream VehicleSnapshot);
+
+  // HISTORICAL DATA: requires persisted telemetry to fulfil replay queries.
+  rpc QueryTelemetryHistory(QueryTelemetryHistoryRequest)
+      returns (stream TelemetryPoint);
+
+  // HISTORICAL AGGREGATE: needs historical storage plus aggregation logic.
+  rpc GetHistoricalAggregates(GetHistoricalAggregatesRequest)
+      returns (GetHistoricalAggregatesResponse);
+}
+
+// ----- Shared Structures -----
+
+message TelemetryPoint {
+  string vehicle_id = 1;
+  double latitude = 2;
+  double longitude = 3;
+  double speed_kmh = 4;
+  double fuel_level = 5;
+  string engine_status = 6;
+  google.protobuf.Timestamp recorded_at = 7;
+}
+
+message VehicleSnapshot {
+  string vehicle_id = 1;
+  google.protobuf.Timestamp last_seen = 2;
+  TelemetryPoint telemetry = 3;
+}
+
+message TimeRange {
+  google.protobuf.Timestamp start = 1;
+  google.protobuf.Timestamp end = 2;
+}
+
+// ----- Live aggregate RPCs -----
+
+message GetFleetSnapshotRequest {
+  // Optional filter for a subset of vehicles; empty means entire fleet.
+  repeated string vehicle_ids = 1;
+  // When true, include message-rate metrics in the response.
+  bool include_metrics = 2;
+}
+
+message GetFleetSnapshotResponse {
+  repeated VehicleSnapshot snapshots = 1;
+  FleetMetrics metrics = 2;
+}
+
+message FleetMetrics {
+  uint32 total_messages = 1;
+  uint32 invalid_messages = 2;
+  uint32 connected_clients = 3;
+  double message_rate_per_second = 4;
+  uint32 window_seconds = 5;
+}
+
+message StreamVehicleSnapshotsRequest {
+  repeated string vehicle_ids = 1;
+  bool include_metrics = 2;
+}
+
+// ----- Historical query RPCs -----
+
+message QueryTelemetryHistoryRequest {
+  repeated string vehicle_ids = 1;
+  TimeRange range = 2;
+  uint32 limit = 3; // Max points per stream chunk when server-side paging.
+  string page_token = 4; // Opaque continuation token for follow-up calls.
+}
+
+message GetHistoricalAggregatesRequest {
+  repeated string vehicle_ids = 1;
+  TimeRange range = 2;
+  AggregationWindow window = 3;
+  repeated AggregateType aggregates = 4;
+}
+
+message AggregationWindow {
+  // Window size in seconds for time-sliced aggregations (e.g., 300 = 5 minutes).
+  uint32 seconds = 1;
+}
+
+enum AggregateType {
+  AGGREGATE_TYPE_UNSPECIFIED = 0;
+  AGGREGATE_TYPE_AVG_SPEED_KMH = 1;
+  AGGREGATE_TYPE_MAX_SPEED_KMH = 2;
+  AGGREGATE_TYPE_TOTAL_DISTANCE_KM = 3;
+  AGGREGATE_TYPE_MIN_FUEL_LEVEL = 4;
+}
+
+message GetHistoricalAggregatesResponse {
+  repeated AggregateBucket buckets = 1;
+}
+
+message AggregateBucket {
+  google.protobuf.Timestamp window_start = 1;
+  google.protobuf.Timestamp window_end = 2;
+  map<string, double> metrics = 3; // Keyed by AggregateType name, e.g. "AVG_SPEED_KMH".
+}

@@ -1,3 +1,4 @@
+const path = require('node:path');
 const pino = require('pino');
 
 function envOrNull(name) {
@@ -27,6 +28,26 @@ function parseNumber(value, defaultValue) {
   return Number.isFinite(parsed) ? parsed : defaultValue;
 }
 
+function parseWindowList(value) {
+  if (!value) {
+    return [];
+  }
+
+  return String(value)
+    .split(',')
+    .map(part => Number(part.trim()))
+    .filter(num => Number.isFinite(num) && num > 0)
+    .map(num => Math.trunc(num));
+}
+
+const defaultRollupWindow = parseNumber(process.env.TELEMETRY_ROLLUP_WINDOW_SECONDS, 300);
+const extraRollupWindows = parseWindowList(process.env.TELEMETRY_ROLLUP_WINDOWS);
+const rollupWindows = Array.from(new Set([defaultRollupWindow, ...extraRollupWindows]))
+  .filter(windowSeconds => Number.isFinite(windowSeconds) && windowSeconds > 0)
+  .map(windowSeconds => Math.trunc(windowSeconds))
+  .sort((a, b) => a - b);
+const primaryRollupWindow = rollupWindows.length > 0 ? rollupWindows[0] : defaultRollupWindow;
+
 const config = {
   logLevel: process.env.LOG_LEVEL || 'info',
   broker: {
@@ -46,6 +67,19 @@ const config = {
   websocket: {
     path: '/stream',
     payloadVersion: 1
+  },
+  telemetryDb: {
+    path: process.env.TELEMETRY_DB_PATH || path.join(process.cwd(), 'data', 'telemetry.db'),
+    rollupWindowSeconds: primaryRollupWindow,
+    rollupWindows,
+    rollupIntervalMs: parseNumber(process.env.TELEMETRY_ROLLUP_INTERVAL_MS, 60_000),
+    rollupCatchUpWindows: parseNumber(process.env.TELEMETRY_ROLLUP_CATCHUP_WINDOWS, 1)
+  },
+  grpc: {
+    enabled: parseBoolean(process.env.GRPC_ENABLED, true),
+    host: process.env.GRPC_HOST || '0.0.0.0',
+    port: parseNumber(process.env.GRPC_PORT, 0),
+    streamIntervalMs: parseNumber(process.env.GRPC_STREAM_INTERVAL_MS, 1_000)
   }
 };
 

@@ -3,3 +3,4 @@
 .env
 /frontend/dist
 /docs/internal
+data/

@@ -50,3 +50,29 @@ npm run build # Build project but don't run
 npm run basicSimulation # Run the included basicSimulation simulation
 npm run recorder # Starts the Gatling Recorder
 ```
+
+### gRPC telemetry sample
+
+Once the Gatling JS gRPC module is available, you can exercise the TelemetryService with the bundled simulations:
+
+```shell
+# JavaScript
+cd javascript
+npm install
+npx gatling run --simulation telemetryGrpcSimulation \
+  grpcHost=localhost \
+  grpcPort=50051 \
+  grpcTls=false \
+  windowSeconds=900
+
+# TypeScript
+cd ../typescript
+npm install
+npx gatling run --typescript --simulation telemetryGrpcSimulation \
+  grpcHost=localhost \
+  grpcPort=50051 \
+  grpcTls=false \
+  windowSeconds=900
+```
+
+The scenarios reuse `protos/telemetry.proto`, issuing `GetFleetSnapshot`, `QueryTelemetryHistory`, and `GetHistoricalAggregates` requests. Adjust `fleetUsers`, `historyUsers`, or `historyDurationSeconds` parameters to emulate different mixes of analytical traffic.
