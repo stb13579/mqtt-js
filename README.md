@@ -1,4 +1,4 @@
-# Fleet Management Demo with MQTT and Gatling
+# Fleet Management Demo for Gatling
 
 A fully functional demo showcasing **real-time fleet tracking** using:
 
@@ -6,7 +6,7 @@ A fully functional demo showcasing **real-time fleet tracking** using:
 - **Gatling** for load testing in JavaScript/TypeScript
 - **Node.js backend** for message processing
 - **Web frontend** for live visualization
-
+- **HTTP and WebSocket** endpoints, which can also be used for testing
 ---
 
 ## Features
