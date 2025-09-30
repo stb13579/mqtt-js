@@ -4,13 +4,21 @@ const { VehicleStore } = require('./services/vehicle-store');
 const { createApiServer } = require('./routes/api');
 const { createWebSocketService } = require('./services/websocket-service');
 const { createMqttService } = require('./services/mqtt-service');
+const { createDatabase } = require('./db');
+const { createTelemetryRepository } = require('./services/telemetry-repository');
+const { createGrpcService } = require('./services/grpc-service');
 
 const state = {
   mqttConnected: false,
   totalMessages: 0,
   invalidMessages: 0,
-  messageTimestamps: []
+  messageTimestamps: [],
+  grpcStreams: 0
 };
+
+const { db, close: closeDatabase } = createDatabase({ config, logger });
+const telemetryRepository = createTelemetryRepository({ db, logger, config });
+telemetryRepository.startRollupScheduler();
 
 const vehicleStore = new VehicleStore({
   limit: config.cacheLimit,
@@ -25,6 +33,7 @@ const httpServer = createApiServer({
   logger,
   state,
   vehicleStore,
+  telemetryRepository,
   getClientCount: () => (websocketService ? websocketService.clientCount() : 0)
 });
 
@@ -45,8 +54,23 @@ const mqttService = createMqttService({
   logger,
   vehicleStore,
   websocketService,
-  state
+  state,
+  telemetryRepository
 });
+
+let grpcService = null;
+try {
+  grpcService = createGrpcService({
+    config,
+    logger,
+    vehicleStore,
+    telemetryRepository,
+    state,
+    getClientCount: () => (websocketService ? websocketService.clientCount() : 0)
+  });
+} catch (err) {
+  logger.error({ err }, 'Failed to initialise gRPC service');
+}
 
 httpServer.listen(config.httpPort, () => {
   logger.info({ port: config.httpPort }, 'HTTP server listening');
@@ -73,7 +97,25 @@ function shutdown() {
 
   mqttService.disconnect(() => {
     logger.info('MQTT client disconnected');
-    process.exit(0);
+    telemetryRepository.stopRollupScheduler();
+
+    const finalize = () => {
+      closeDatabase();
+      process.exit(0);
+    };
+
+    if (grpcService && typeof grpcService.close === 'function') {
+      grpcService.close(err => {
+        if (err) {
+          logger.warn({ err }, 'gRPC server closed with error');
+        } else {
+          logger.info('gRPC server closed');
+        }
+        finalize();
+      });
+    } else {
+      finalize();
+    }
   });
 
   const forceExitTimer = setTimeout(() => process.exit(0), 5000);

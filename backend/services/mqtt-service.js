@@ -1,8 +1,9 @@
 const mqtt = require('mqtt');
 const { validateTelemetry } = require('../utils/validation');
 const { recordTimestamp } = require('../utils/message-metrics');
+const { haversine } = require('../utils/geo');
 
-function createMqttService({ config, logger, vehicleStore, websocketService, state }) {
+function createMqttService({ config, logger, vehicleStore, websocketService, state, telemetryRepository }) {
   const { broker, subscriptionTopic, messageWindowMs } = config;
 
   const mqttOptions = {
@@ -98,6 +99,14 @@ function createMqttService({ config, logger, vehicleStore, websocketService, sta
 
     websocketService.broadcastUpdate(enriched);
     logger.debug({ topic: receivedTopic, vehicleId: message.vehicleId }, 'Processed telemetry');
+
+    if (telemetryRepository) {
+      try {
+        telemetryRepository.recordTelemetry({ message, previous, enriched });
+      } catch (err) {
+        logger.error({ err, vehicleId: message.vehicleId }, 'Failed to persist telemetry');
+      }
+    }
   });
 
   function disconnect(callback) {
@@ -138,16 +147,4 @@ function computeSpeed(previous, current) {
 
   return distanceKm / deltaHours;
 }
-
-function haversine(lat1, lng1, lat2, lng2) {
-  const toRad = deg => deg * (Math.PI / 180);
-  const R = 6371;
-
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
 module.exports = { createMqttService };

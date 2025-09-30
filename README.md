@@ -11,8 +11,9 @@ A fully functional demo showcasing **real-time fleet tracking** using:
 
 ## Features
 - Simulate **thousands of vehicles** sending GPS data
-- Real-time map visualization of vehicle movement
-- Gatling load tests for MQTT to **stress-test your system**
+- Real-time map visualization of vehicle movement with rollups and recent history panels
+- gRPC analytics service for fleet snapshots, historical replay, and aggregate queries
+- Gatling load tests for MQTT and gRPC traffic to **stress-test your system**
 - End-to-end example of scalable IoT architecture
 
 ---
@@ -25,17 +26,18 @@ A fully functional demo showcasing **real-time fleet tracking** using:
                                └────────────┬───────────────┘
                                             │ MQTT publish
 ┌────────────────────────────┐              │
-│ Simulator (optional load)  │──────────────┘
+│ Simulator (optional load)  │──────────────┘ MQTT messages originate from Gatling or simulator
 └──────────────┬─────────────┘
                │
-               ▼
-        ┌───────────────┐
+               │ MQTT publish
+        ┌──────▼────────┐
         │   MQTT broker │
         └──────┬────────┘
                │ subscribe
-        ┌──────▼────────┐
-        │ Backend/API   │
-        │ + WS fan-out  │
+        ┌──────▼────────┐                     ┌────────────────────────────┐
+        │ Backend/API   │                     │ Gatling gRPC / analytics   │
+        │ + WS fan-out  │◄────────────────────┤ clients & dashboards       │
+        │ + gRPC layer  │        gRPC calls   └────────────────────────────┘
         └──────┬────────┘
                │ WebSocket stream
         ┌──────▼────────┐
@@ -52,9 +54,10 @@ A fully functional demo showcasing **real-time fleet tracking** using:
 **Components:**
 1. **MQTT Broker:** Handles publish/subscribe messaging (e.g., Mosquitto).
 2. **Simulated Vehicles:** Scripted clients publishing GPS data.
-3. **Backend:** Subscribes to MQTT topics, forwards updates via WebSocket.
-4. **Frontend:** Displays vehicle locations on a map.
-5. **Gatling Load Tests:** Simulates thousands of MQTT clients.
+3. **Backend:** Subscribes to MQTT topics, stores telemetry in SQLite, serves gRPC and HTTP APIs.
+4. **gRPC Telemetry Service:** Fleet snapshots, historical replay, and aggregate queries.
+5. **Frontend:** Displays live vehicles, rollup metrics, and recent telemetry history.
+6. **Gatling Load Tests:** Simulates thousands of MQTT or gRPC clients.
 
 ---
 
@@ -99,7 +102,7 @@ A fully functional demo showcasing **real-time fleet tracking** using:
    ```bash
    npm run backend
    ```
-   The API answers on `http://localhost:8080` with readiness at `/readyz`, stats at `/stats`, and a WebSocket stream at `/stream`.
+   The API answers on `http://localhost:8080` with readiness at `/readyz`, stats at `/stats`, WebSocket stream at `/stream`, and gRPC on an ephemeral port logged as `gRPC server listening` (set `GRPC_PORT=50051` for a fixed port).
 5. Start the frontend in a separate terminal:
    ```bash
    npm run dev
@@ -108,8 +111,37 @@ A fully functional demo showcasing **real-time fleet tracking** using:
 6. (Optional) Generate background telemetry:
    ```bash
    npm run simulate -- --vehicles=25 --rate=1s --region=paris
-   ```
+  ```
    Stop the simulator with `Ctrl+C` once you have the desired sample load.
+
+### gRPC telemetry API
+
+The backend persists telemetry in SQLite and serves a gRPC surface for dashboards, workers, or load tests. Pin the listener to a predictable port, then query it with `grpcurl` (reflection is off so point at the local proto):
+
+```bash
+GRPC_PORT=50051 npm run backend
+
+grpcurl -plaintext \
+  -import-path protos \
+  -proto telemetry.proto \
+  -d '{}' \
+  localhost:50051 telemetry.v1.TelemetryService/GetFleetSnapshot
+
+START=$(($(date +%s) - 600))
+END=$(date +%s)
+grpcurl -plaintext \
+  -import-path protos \
+  -proto telemetry.proto \
+  -d "{\"range\":{\"start\":{\"seconds\":$START},\"end\":{\"seconds\":$END}},\"limit\":50}" \
+  localhost:50051 telemetry.v1.TelemetryService/QueryTelemetryHistory
+```
+
+For environments that prefer REST, the backend exposes analytics facades backed by the same rollups and history:
+
+- `GET /telemetry/summary?windowSeconds=900&durationSeconds=900` &mdash; aggregated speed, fuel, and distance metrics.
+- `GET /telemetry/history?durationSeconds=900&limit=20` &mdash; most recent telemetry samples (optionally filter with `vehicleId=<id>`).
+
+The frontend sidebar consumes these endpoints to render rolling KPIs and a recent telemetry table.
 
 ### Smoke test with Gatling (TypeScript)
 
@@ -143,6 +175,32 @@ npx gatling run --simulation deliveryVehicleSimulation \
 
 Use identical key/value arguments across languages; Gatling resolves them through the `getParameter()` helper. Append `deviceCount=20` or `topic=fleet/demo/telemetry` to override defaults.
 
+### gRPC Gatling sample
+
+When the Gatling JS gRPC module ships, run the bundled TelemetryService scenarios to exercise historical queries under load:
+
+```bash
+# JavaScript
+cd gatling/javascript
+npm install
+npx gatling run --simulation telemetryGrpcSimulation \
+  grpcHost=localhost \
+  grpcPort=50051 \
+  grpcTls=false \
+  windowSeconds=900
+
+# TypeScript
+cd ../typescript
+npm install
+npx gatling run --typescript --simulation telemetryGrpcSimulation \
+  grpcHost=localhost \
+  grpcPort=50051 \
+  grpcTls=false \
+  windowSeconds=900
+```
+
+See `gatling/README.md` for additional parameters (`fleetUsers`, `historyUsers`, `historyDurationSeconds`, etc.).
+
 ## Backend Layout & Configuration
 
 The backend runtime is now composed of small modules that make it easier to test and extend:
@@ -156,14 +214,22 @@ backend/
 │   ├── cors.js            # Minimal CORS preflight handling
 │   └── error-handler.js   # Uniform HTTP error responses
 ├── routes/
-│   └── api.js             # /healthz, /readyz, /stats endpoints
+│   └── api.js             # /healthz, /readyz, /stats, /telemetry/* endpoints
 ├── services/
+│   ├── grpc-service.js    # TelemetryService gRPC surface
 │   ├── mqtt-service.js    # Broker subscription and telemetry enrichment
+│   ├── telemetry-repository.js # SQLite persistence, rollups, and queries
 │   ├── vehicle-store.js   # In-memory cache with TTL eviction
 │   └── websocket-service.js # Stream fan-out and backpressure guardrails
+├── db/
+│   ├── index.js           # SQLite bootstrap and migration runner
+│   └── migrations/        # Versioned schema migrations
+├── workers/
+│   └── rollup-worker.js   # CLI worker for backfilling rollups
 └── utils/
     ├── message-metrics.js # Sliding window message rate calculations
-    └── validation.js      # Telemetry schema validation helpers
+    ├── validation.js      # Telemetry schema validation helpers
+    └── geo.js             # Haversine helpers shared by MQTT + persistence
 ```
 
 `backend/config/index.js` centralises defaults for the environment variables listed below. Override them in `.env` or the process environment to change behaviour without touching code.
@@ -182,8 +248,25 @@ backend/
 | `VEHICLE_CACHE_SIZE` | `1000` | Maximum vehicles retained in memory before oldest eviction. |
 | `MESSAGE_RATE_WINDOW_MS` | `60000` | Sliding window used to compute messages-per-second. |
 | `VEHICLE_TTL_MS` | `60000` | Time-to-live for inactive vehicles (set to `0` to disable). |
+| `TELEMETRY_DB_PATH` | `<repo>/data/telemetry.db` | SQLite file used for historical storage (created on launch). |
+| `TELEMETRY_ROLLUP_WINDOW_SECONDS` | `300` | Base aggregation window (seconds) for rollups. |
+| `TELEMETRY_ROLLUP_WINDOWS` | empty | Optional comma-separated additional rollup windows (e.g., `900,3600`). |
+| `TELEMETRY_ROLLUP_INTERVAL_MS` | `60000` | Frequency for the rollup scheduler to compute new buckets. |
+| `TELEMETRY_ROLLUP_CATCHUP_WINDOWS` | `1` | How many extra windows to recompute when catching up after downtime. |
+| `GRPC_ENABLED` | `true` | Enable the TelemetryService gRPC server. |
+| `GRPC_HOST` | `0.0.0.0` | Bind address for the gRPC server. |
+| `GRPC_PORT` | `0` | gRPC port (`0` lets the OS assign one; override for fixed ports). |
+| `GRPC_STREAM_INTERVAL_MS` | `1000` | Poll interval for `StreamVehicleSnapshots` fallback updates. |
 
 The service-level tests under `test/mqtt-service.test.js`, `test/websocket-service.test.js`, and `test/vehicle-store.test.js` provide focused coverage for telemetry validation, cache expiry, and WebSocket backpressure.
+
+Need to backfill analytics after importing data? Run the rollup worker:
+
+```bash
+ROLLUP_WINDOWS=900,3600 ROLLUP_START="2024-01-01T00:00:00Z" npm run rollups
+```
+
+The worker shares the same configuration parser as the backend, so env overrides like `TELEMETRY_DB_PATH` apply automatically.
 
 ## Managed MQTT Broker
 

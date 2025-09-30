@@ -10,17 +10,21 @@
     "test": "node --test",
     "simulate": "node simulator/index.js",
     "backend": "node backend/index.js",
+    "rollups": "node backend/workers/rollup-worker.js",
     "dev": "vite --config frontend/vite.config.js",
     "build": "vite build --config frontend/vite.config.js",
     "start": "vite preview --config frontend/vite.config.js --host 0.0.0.0"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.9.13",
+    "@grpc/proto-loader": "^0.7.10",
     "dotenv": "^16.4.5",
     "leaflet": "^1.9.4",
     "leaflet.markercluster": "^1.5.3",
     "mqtt": "^5.5.0",
     "pino": "^9.2.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "better-sqlite3": "^9.0.0"
   },
   "devDependencies": {
     "vite": "^7.1.7"

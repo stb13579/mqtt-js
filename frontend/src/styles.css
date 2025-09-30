@@ -132,6 +132,56 @@ body {
   gap: 12px;
 }
 
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(148, 163, 184, 0.04);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.history__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history__header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.history__window {
+  font-size: 0.8rem;
+  opacity: 0.6;
+}
+
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.history-table th,
+.history-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.history-table th {
+  font-weight: 600;
+  opacity: 0.75;
+}
+
+.history-table__placeholder td {
+  text-align: center;
+  opacity: 0.6;
+}
+
 .filter-group {
   display: flex;
   flex-direction: column;
